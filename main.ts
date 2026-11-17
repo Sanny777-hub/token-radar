@@ -34,6 +34,11 @@ function arg(name: string, fallback: string): string {
   return withEquals === undefined ? fallback : withEquals.slice(name.length + 3);
 }
 
+/** Whether a boolean flag (e.g. --summary) is present on the command line; default off. */
+function flag(name: string): boolean {
+  return process.argv.includes(`--${name}`);
+}
+
 const inputArg = arg('input', '/input');
 const inputFile = inputArg.endsWith('.json') ? inputArg : join(inputArg, 'snapshot.json');
 if (!existsSync(inputFile)) {
@@ -89,3 +94,8 @@ process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
+
+// Optional --summary line: a reader can ask for the exact count of rows written, off by default.
+if (flag('summary')) {
+  process.stdout.write(`token radar: ${board.length} rows written to ${join(out, 'board.json')}\n`);
+}

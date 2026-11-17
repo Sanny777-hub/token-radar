@@ -168,6 +168,20 @@ export interface RadarRow {
   growth_multiplier: number;
   maturity_multiplier: number;
   category_multiplier: number;
+  /** A display-only word for the row's implied value; the board itself never reads it. */
+  score_label: string;
+}
+
+/**
+ * A numeric implied value as one short human word, for a reader skimming the board. A label only:
+ * it is derived from a finished figure, so calling it cannot move a row or change a rank.
+ */
+export function scoreLabel(impliedValueUsd: number): string {
+  if (impliedValueUsd >= 100_000_000) return 'blockbuster';
+  if (impliedValueUsd >= 10_000_000) return 'heavyweight';
+  if (impliedValueUsd >= 1_000_000) return 'solid';
+  if (impliedValueUsd >= 100_000) return 'modest';
+  return 'small';
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value, not a model's. */
@@ -438,6 +452,7 @@ export function radarRow(row: BoardRow): RadarRow {
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     category_multiplier: row.model.category_multiplier,
+    score_label: scoreLabel(row.implied_value_usd),
   };
 }
 
