@@ -1,0 +1,7 @@
+{
+  "name": "token-radar",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "token-radar-01 entry: pre-token protocols ranked by implied value"
+}

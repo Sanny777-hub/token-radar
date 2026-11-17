@@ -1,0 +1,6 @@
+out/
+out2/
+*.png
+!screenshots/
+!screenshots/*.png
+node_modules/
