@@ -54,40 +54,44 @@
     return days + 'd';
   }
 
-  // Category weights (spec order).
-  var W1 = ['lending', 'cdp', 'yield', 'yield aggregator', 'liquid staking', 'liquid restaking'];
-  var W095 = ['derivatives', 'perpetuals'];
-  var W09 = ['dex', 'dex aggregator', 'options', 'prediction market', 'restaking', 'index', 'curator'];
-  var W085 = ['rwa', 'stablecoin', 'insurance', 'risk curators', 'algorithmic stablecoin'];
+  // The overall share of snapshot protocols that record a token: the odds a category with no measured
+  // record keeps (lib/model.ts's OVERALL_TOKEN_ODDS).
+  var OVERALL_ODDS = 0.55;
 
-  function categoryWeight(category) {
-    var c = (category || '').toLowerCase();
-    if (W1.indexOf(c) !== -1) return 1.0;
-    if (W095.indexOf(c) !== -1) return 0.95;
-    if (W09.indexOf(c) !== -1) return 0.9;
-    if (W085.indexOf(c) !== -1) return 0.85;
-    return 1.0;
+  // A category's chance of ever recording a token, from the snapshot's own measured table
+  // (model.token_odds); a category not listed keeps the overall share.
+  function tokenOdds(category) {
+    if (category === null) return OVERALL_ODDS;
+    var odds = RADAR.model.token_odds[category];
+    if (odds !== undefined) return odds;
+    return OVERALL_ODDS;
   }
 
-  // Recompute the model on the page.
+  // Recompute the model on the page, mirroring lib/model.ts exactly so the page can show whether it
+  // agrees with the stored implied value. Every step is the model's own: the fitted power-law base, the
+  // clamped 7-day growth, the age-based maturity, the quiet-age penalty and the category's token odds.
   function computeModel(row) {
     var m = RADAR.model;
-    var growth = row.change_7d == null ? 0 : row.change_7d;
-    var clamped = Math.max(m.growth_floor, Math.min(m.growth_cap, growth));
+    // base = base_coefficient x tvl ^ base_exponent: the fitted power law, in dollars.
+    var base = m.base_coefficient * Math.pow(row.tvl_usd, m.base_exponent);
+    // growth = clamp(change_7d, growth_floor, growth_cap) per cent; a missing change counts as 0.
+    var rawGrowth = row.change_7d == null ? 0 : row.change_7d;
+    var clamped = Math.max(m.growth_floor, Math.min(m.growth_cap, rawGrowth));
     var growthFactor = 1 + (clamped / 100) * m.growth_weight;
+    // maturity = maturity_floor + min(max(age, 0), maturity_days) / maturity_days x maturity_range;
+    // an unknown age counts as unknown_age_days.
     var age = row.age_days == null ? m.unknown_age_days : row.age_days;
     var maturityFactor = m.maturity_floor +
-      (Math.min(age, m.maturity_days) / m.maturity_days) * m.maturity_range;
-    var weight = categoryWeight(row.category);
-    var categoryFactor = m.category_floor + weight * m.category_range;
+      (Math.min(Math.max(age, 0), m.maturity_days) / m.maturity_days) * m.maturity_range;
+    // quiet = quiet_penalty when the age is known and past quiet_days, else 1.
     var quiet = (row.age_days != null && row.age_days > m.quiet_days) ? m.quiet_penalty : 1;
-    var value = row.tvl_usd * m.base_multiple * growthFactor * maturityFactor * categoryFactor * quiet;
-    value = Math.max(1, Math.round(value));
+    var odds = tokenOdds(row.category);
+    var value = Math.max(1, Math.round(base * growthFactor * maturityFactor * quiet * odds));
     return {
+      base: base,
       growthFactor: growthFactor,
       maturityFactor: maturityFactor,
-      categoryFactor: categoryFactor,
-      categoryWeight: weight,
+      odds: odds,
       quiet: quiet,
       value: value
     };
@@ -240,6 +244,40 @@
     container.appendChild(lede);
   }
 
+  // KPI strip: the headline figures of the snapshot, near the top of the dashboard.
+  function buildKpi(container) {
+    var strip = el('section', 'kpi-strip');
+    strip.setAttribute('data-role', 'kpi-strip');
+    var kpis = [
+      ['Protocols in snapshot', RADAR.board_size + RADAR.live_size],
+      ['On watchlist', RADAR.watchlist_size],
+      ['Pre-token rows on board', RADAR.board_size],
+      ['Live-token protocols', RADAR.live_size],
+      ['Model version', RADAR.model_version],
+      ['Snapshot date', RADAR.as_of]
+    ];
+    kpis.forEach(function (k) {
+      var cell = el('div', 'kpi');
+      cell.appendChild(el('div', 'kpi-label', k[0]));
+      cell.appendChild(el('div', 'kpi-value', String(k[1])));
+      strip.appendChild(cell);
+    });
+    container.appendChild(strip);
+  }
+
+  // Integrity strip: every snapshot protocol is accounted for by the board or the live set, once each.
+  function buildIntegrity(container) {
+    var strip = el('section', 'integrity');
+    strip.setAttribute('data-role', 'integrity-strip');
+    var total = RADAR.board_size + RADAR.live_size;
+    strip.appendChild(el('div', 'integrity-line',
+      RADAR.board_size + ' board rows + ' + RADAR.live_size +
+      ' live rows = ' + total + ' protocols, zero overlap'));
+    strip.appendChild(el('div', 'integrity-line', 'Data source: ' + RADAR.source));
+    strip.appendChild(el('div', 'integrity-line', 'Snapshot date: ' + RADAR.as_of));
+    container.appendChild(strip);
+  }
+
   function buildControls(container) {
     var controls = el('div', 'controls');
 
@@ -313,31 +351,32 @@
     panel.appendChild(el('h2', null, 'How implied value is computed'));
 
     var words = el('p', null,
-      'A protocol\u2019s implied value starts from its total value locked, scaled by a base multiple. ' +
-      'It is boosted by the 7-day growth trend (clamped to a range), by maturity (how long the protocol ' +
-      'has been live), by its category, and penalized when it has gone quiet for too long.');
+      'A protocol\u2019s implied value starts from its total value locked, scaled by a fitted power law ' +
+      'of the snapshot\u2019s own market caps. It is boosted by the 7-day growth trend (clamped to a range), ' +
+      'by maturity (how long the protocol has been live), by its category\u2019s measured chance of ever ' +
+      'recording a token, and penalized when it has gone quiet for too long.');
     panel.appendChild(words);
 
     var formula = el('div', 'formula',
-      'implied = TVL \u00d7 ' + m.base_multiple +
+      'implied = ' + m.base_coefficient.toFixed(2) + ' \u00d7 TVL^' + m.base_exponent +
       ' \u00d7 (1 + clamp(7d, ' + m.growth_floor + ', ' + m.growth_cap + ')/100 \u00d7 ' + m.growth_weight + ')' +
       ' \u00d7 (' + m.maturity_floor + ' + min(age, ' + m.maturity_days + ')/' + m.maturity_days +
       ' \u00d7 ' + m.maturity_range + ')' +
-      ' \u00d7 (' + m.category_floor + ' + weight \u00d7 ' + m.category_range + ')' +
+      ' \u00d7 token_odds' +
       ' \u00d7 quiet(> ' + m.quiet_days + ' days \u2192 ' + m.quiet_penalty + ')');
     panel.appendChild(formula);
 
     var keys = el('div', 'equation');
     var rows = [
-      ['Base multiple', m.base_multiple],
+      ['Base coefficient', m.base_coefficient.toFixed(2)],
+      ['Base exponent', m.base_exponent],
       ['Growth weight', m.growth_weight],
       ['Growth floor / cap', m.growth_floor + ' / ' + m.growth_cap],
       ['Maturity floor', m.maturity_floor],
       ['Maturity range', m.maturity_range],
       ['Maturity days', m.maturity_days],
       ['Unknown age treated as', m.unknown_age_days + ' days'],
-      ['Category floor', m.category_floor],
-      ['Category range', m.category_range],
+      ['Token odds (unlisted category)', OVERALL_ODDS],
       ['Quiet penalty', m.quiet_penalty + ' after ' + m.quiet_days + ' days']
     ];
     rows.forEach(function (r) {
@@ -349,12 +388,14 @@
     panel.appendChild(keys);
 
     var w = el('div', 'formula');
-    w.appendChild(el('div', 'sub', 'Category weights'));
-    var weightText = '1.0 lending, CDP, yield, yield aggregator, liquid staking, liquid restaking; ' +
-      '0.95 derivatives, perpetuals; 0.9 DEX, DEX aggregator, options, prediction market, ' +
-      'restaking, index, curator; 0.85 RWA, stablecoin, insurance, risk curators, algorithmic ' +
-      'stablecoin; 1.0 otherwise';
-    w.appendChild(el('p', null, weightText));
+    w.appendChild(el('div', 'sub', 'Token odds by category'));
+    var oddsList = Object.keys(m.token_odds).sort(function (a, b) {
+      return m.token_odds[b] - m.token_odds[a];
+    }).map(function (k) {
+      return k + ' ' + m.token_odds[k].toFixed(2);
+    });
+    oddsList.push('any other category ' + OVERALL_ODDS.toFixed(2));
+    w.appendChild(el('p', null, oddsList.join('; ')));
     panel.appendChild(w);
 
     container.appendChild(panel);
@@ -607,9 +648,10 @@
       row.change_7d == null ? el('span', null, 'n/a') :
         el('span', row.change_7d >= 0 ? 'pos' : 'neg', fmtPct(row.change_7d)));
     kvLine(sec, 'Age', el('span', null, fmtAge(row.age_days) + ' \u00b7 no token'));
+    kvLine(sec, 'Base value', el('span', null, '$' + fmtUsd(model.base)));
     kvLine(sec, 'Growth multiplier', el('span', null, model.growthFactor.toFixed(4)));
     kvLine(sec, 'Maturity multiplier', el('span', null, model.maturityFactor.toFixed(4)));
-    kvLine(sec, 'Category weight', el('span', null, model.categoryWeight.toFixed(2)));
+    kvLine(sec, 'Token odds', el('span', null, model.odds.toFixed(2)));
     kvLine(sec, 'Implied value', el('span', null, '$' + fmtUsd(model.value)));
     detail.appendChild(sec);
 
@@ -658,6 +700,12 @@
     close.addEventListener('click', function () { closeDetail(); });
 
     container.appendChild(detail);
+
+    // Mark the drawer open so the stylesheet slides it into view. The base .detail rule keeps it
+    // hidden off screen (translateX(100%)); only .detail.open / [data-open] reveals it. The reflow
+    // flush commits the closed position first so the transition actually plays on the way in.
+    void detail.offsetWidth;
+    detail.classList.add('open');
   }
 
   function openDetail(slug) {
@@ -684,6 +732,8 @@
     while (shell.firstChild) shell.removeChild(shell.firstChild);
 
     buildTop(shell);
+    buildKpi(shell);
+    buildIntegrity(shell);
     buildLede(shell);
     buildControls(shell);
 
